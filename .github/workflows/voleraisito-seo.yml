@@ -1,0 +1,55 @@
+name: voler.ai — SEO Monitor (weekly)
+
+# Scheduler for the voler.ai SEO/GEO/LLM weekly report.
+# The script + website source live in the PRIVATE repo LinosCo/voleraisito;
+# this public repo only triggers it (free Actions minutes). The repo is checked
+# out via a fine-grained PAT and the generated report is pushed back THERE, so
+# GA4 traffic data never lands in this public repo or its logs.
+#
+# Required secrets (Settings → Secrets and variables → Actions):
+#   VOLERAISITO_PAT        fine-grained PAT, repo LinosCo/voleraisito, Contents: Read and write
+#   GOOGLE_CREDENTIALS_JSON  GA4/Search Console service-account JSON
+#   ANTHROPIC_API_KEY      for the AI analysis section
+#   TELEGRAM_BOT_TOKEN     (rotate the previously-hardcoded one)
+#   TELEGRAM_CHAT_ID
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Monday 06:00 UTC (08:00 Roma)
+  workflow_dispatch:
+
+jobs:
+  seo-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout voleraisito (private)
+        uses: actions/checkout@v4
+        with:
+          repository: LinosCo/voleraisito
+          token: ${{ secrets.VOLERAISITO_PAT }}
+          # persist-credentials (default true) lets the script git-push the report back
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install google-analytics-data google-api-python-client google-auth
+
+      - name: Write Google credentials
+        run: |
+          mkdir -p ~/.config/gcloud
+          printf '%s' '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > ~/.config/gcloud/application_default_credentials.json
+
+      - name: Configure git identity (for report push-back)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Run SEO Monitor
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python3 scripts/seo-monitor.py --force
