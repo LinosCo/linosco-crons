@@ -1,0 +1,407 @@
+# =============================================================================
+# Cron Jobs Scheduler per AI Interviewer / Business Tuner
+# =============================================================================
+#
+# Questo workflow sostituisce i Vercel Cron Jobs dato che la piattaforma
+# è deployata su Railway Hobby.
+#
+# Secrets necessari (configurare in GitHub > Settings > Secrets):
+#   - CRON_SECRET:      Token segreto per autenticare le chiamate cron
+#   - RAILWAY_APP_URL:  URL base dell'app Railway (es. https://myapp.up.railway.app)
+#
+# Tutti gli orari sono in UTC.
+# =============================================================================
+
+name: AI Interviewer (V1) — Cron Jobs
+
+on:
+  schedule:
+    # ── High-Frequency Jobs ──────────────────────────────────────────────
+    - cron: '*/10 * * * *' # Ogni 10 minuti — signal classification retry
+    - cron: '*/15 * * * *' # Ogni 15 minuti — dispatch contenuti programmati
+    - cron: '0 */2 * * *'  # Ogni 2 ore — signal ingestion proactive auto-publish
+    - cron: '0 */6 * * *'  # Ogni 6 ore — signal ingestion full
+
+    # ── Daily Jobs ────────────────────────────────────────────────────────
+    - cron: '0 0 * * *'    # Ogni giorno a mezzanotte UTC
+    - cron: '0 2 * * *'    # Ogni giorno alle 02:00 UTC
+    - cron: '30 2 * * *'   # Ogni giorno alle 02:30 UTC
+    - cron: '0 3 * * *'    # Ogni giorno alle 03:00 UTC
+
+    - cron: '0 5 * * *'    # Ogni giorno alle 05:00 UTC — signal ingestion trends
+
+    # ── Weekly Jobs (Domenica) ────────────────────────────────────────────
+    - cron: '0 4 * * 0'    # Domenica alle 04:00 UTC
+
+    # ── Weekly Jobs (Lunedi) ──────────────────────────────────────────────
+    - cron: '0 4 * * 1'    # Lunedi alle 04:00 UTC
+    - cron: '0 6 * * 1'    # Lunedi alle 06:00 UTC
+    - cron: '0 8 * * 1'    # Lunedi alle 08:00 UTC
+
+    # ── Monthly Jobs (1° del mese) ────────────────────────────────────────
+    - cron: '30 0 1 * *'   # 1° del mese alle 00:30 UTC
+    - cron: '0 1 1 * *'    # 1° del mese alle 01:00 UTC
+
+  # Permette trigger manuale da GitHub UI
+  workflow_dispatch:
+    inputs:
+      job:
+        description: 'Quale cron job eseguire manualmente'
+        required: true
+        type: choice
+        options:
+          - all
+          - dispatch-scheduled
+          - reset-credits
+          - aggregate-chatbot-analytics
+          - backup-db
+          - cms-sync-analytics
+          - detect-gaps
+          - sync-insights
+          - cms-generate-suggestions
+          - serp-monitoring
+          - reset-monthly-counters
+          - partner-fees
+          - signal-ingestion-fast
+          - signal-ingestion-full
+          - signal-ingestion-trends
+          - signal-ingestion-proactive
+          - signal-classify-retry
+
+env:
+  APP_URL: ${{ secrets.RAILWAY_APP_URL }}
+  AUTH_HEADER: 'Authorization: Bearer ${{ secrets.CRON_SECRET }}'
+  CURL_OPTS: '--fail --silent --show-error --max-time 120 --retry 3 --retry-delay 10'
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════
+  # EVERY 15 MIN: Dispatch Scheduled Content
+  # Trova ProjectTipItem con status='scheduled' e scheduledAt <= now(),
+  # li marca come 'dispatched' e avvia la pubblicazione.
+  # Nota: GitHub Actions ha un jitter fino a ~5min sui cron, quindi
+  # usiamo */15 invece di */5 per affidabilità.
+  # ═══════════════════════════════════════════════════════════════════════
+  dispatch-scheduled:
+    if: >-
+      github.event.schedule == '*/15 * * * *' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'dispatch-scheduled' || github.event.inputs.job == 'all'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch Scheduled Content
+        run: |
+          echo "📤 Avvio dispatch contenuti programmati..."
+          RESPONSE=$(curl ${{ env.CURL_OPTS }} \
+            -H "${{ env.AUTH_HEADER }}" \
+            "${{ env.APP_URL }}/api/cron/dispatch-scheduled")
+          echo "Response: $RESPONSE"
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # DAILY: Reset Credits (00:00 UTC)
+  # Resetta monthlyCreditsUsed per org con creditsResetDate scaduta.
+  # Design smart-daily: gira ogni giorno ma resetta solo le org "scadute".
+  # CRITICO: senza questo, gli utenti non possono usare la piattaforma.
+  # ═══════════════════════════════════════════════════════════════════════
+  reset-credits:
+    if: >-
+      github.event.schedule == '0 0 * * *' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'reset-credits' || github.event.inputs.job == 'all'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Reset Credits
+        run: |
+          echo "🔄 Avvio reset crediti..."
+          RESPONSE=$(curl ${{ env.CURL_OPTS }} \
+            -X POST \
+            -H "${{ env.AUTH_HEADER }}" \
+            -H "Content-Type: application/json" \
+            "${{ env.APP_URL }}/api/cron/reset-credits")
+          echo "Response: $RESPONSE"
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # DAILY: Aggregate Chatbot Analytics (02:00 UTC)
+  # Usa LLM per clusterizzare messaggi chatbot in temi e sentiment.
+  # Alimenta la dashboard analytics chatbot.
+  # ═══════════════════════════════════════════════════════════════════════
+  aggregate-chatbot-analytics:
+    if: >-
+      github.event.schedule == '0 2 * * *' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'aggregate-chatbot-analytics' || github.event.inputs.job == 'all'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Aggregate Chatbot Analytics
+        run: |
+          echo "📊 Avvio aggregazione analytics chatbot..."
+          RESPONSE=$(curl ${{ env.CURL_OPTS }} \
+            -H "${{ env.AUTH_HEADER }}" \
+            "${{ env.APP_URL }}/api/cron/aggregate-chatbot-analytics")
+          echo "Response: $RESPONSE"
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # DAILY: Database Backup (02:30 UTC)
+  # Crea backup compresso su volume persistente (/app/backups).
+  # ═══════════════════════════════════════════════════════════════════════
+  backup-db:
+    if: >-
+      github.event.schedule == '30 2 * * *' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'backup-db' || github.event.inputs.job == 'all'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Database Backup
+        run: |
+          echo "💾 Avvio backup database..."
+          RESPONSE=$(curl ${{ env.CURL_OPTS }} \
+            -X POST \
+            -H "${{ env.AUTH_HEADER }}" \
+            -H "Content-Type: application/json" \
+            "${{ env.APP_URL }}/api/cron/backup-db")
+          echo "Response: $RESPONSE"
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # DAILY: CMS Sync Analytics (03:00 UTC)
+  # Sincronizza dati da Google Analytics + Search Console.
+  # Deve girare PRIMA di sync-insights per fornire dati freschi.
+  # ═══════════════════════════════════════════════════════════════════════
+  cms-sync-analytics:
+    if: >-
+      github.event.schedule == '0 3 * * *' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'cms-sync-analytics' || github.event.inputs.job == 'all'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: CMS Sync Analytics
+        run: |
+          echo "📈 Avvio sync analytics CMS..."
+          RESPONSE=$(curl ${{ env.CURL_OPTS }} \
+            -H "${{ env.AUTH_HEADER }}" \
+            "${{ env.APP_URL }}/api/cron/cms-sync-analytics")
+          echo "Response: $RESPONSE"
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # WEEKLY DOMENICA: Detect Knowledge Gaps (04:00 UTC)
+  # Per ogni bot PUBLISHED, analizza conversazioni per gap nella KB.
+  # Meccanismo di auto-growth della knowledge base.
+  # ═══════════════════════════════════════════════════════════════════════
+  detect-gaps:
+    if: >-
+      github.event.schedule == '0 4 * * 0' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'detect-gaps' || github.event.inputs.job == 'all'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Detect Knowledge Gaps
+        run: |
+          echo "🔍 Avvio rilevamento gap nella knowledge base..."
+          RESPONSE=$(curl ${{ env.CURL_OPTS }} \
+            -H "${{ env.AUTH_HEADER }}" \
+            "${{ env.APP_URL }}/api/cron/detect-gaps")
+          echo "Response: $RESPONSE"
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # WEEKLY LUNEDI: Cross-Channel Sync Insights (04:00 UTC)
+  # Aggrega 6 fonti dati → LLM genera 5-7 insight azionabili per org.
+  # Alimenta CMS suggestions e dashboard insight.
+  # ═══════════════════════════════════════════════════════════════════════
+  sync-insights:
+    if: >-
+      github.event.schedule == '0 4 * * 1' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'sync-insights' || github.event.inputs.job == 'all'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Sync Cross-Channel Insights
+        run: |
+          echo "🔗 Avvio sync insight cross-channel..."
+          RESPONSE=$(curl ${{ env.CURL_OPTS }} \
+            -H "${{ env.AUTH_HEADER }}" \
+            "${{ env.APP_URL }}/api/cron/sync-insights")
+          echo "Response: $RESPONSE"
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # WEEKLY LUNEDI: CMS Generate Suggestions (06:00 UTC)
+  # Genera suggerimenti contenuto da CrossChannelInsight recenti.
+  # Gira 2h dopo sync-insights per avere insight freschi.
+  # Ridotto da daily a weekly: gli insight arrivano solo il lunedi.
+  # ═══════════════════════════════════════════════════════════════════════
+  cms-generate-suggestions:
+    if: >-
+      github.event.schedule == '0 6 * * 1' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'cms-generate-suggestions' || github.event.inputs.job == 'all'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Generate CMS Suggestions
+        run: |
+          echo "💡 Avvio generazione suggerimenti CMS..."
+          RESPONSE=$(curl ${{ env.CURL_OPTS }} \
+            -H "${{ env.AUTH_HEADER }}" \
+            "${{ env.APP_URL }}/api/cron/cms-generate-suggestions")
+          echo "Response: $RESPONSE"
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # WEEKLY LUNEDI: SERP Monitoring (08:00 UTC)
+  # Scan Google per menzioni brand via SerpAPI.
+  # Rate limited: 2s delay tra scan. Settimanale per limiti API.
+  # ═══════════════════════════════════════════════════════════════════════
+  serp-monitoring:
+    if: >-
+      github.event.schedule == '0 8 * * 1' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'serp-monitoring' || github.event.inputs.job == 'all'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: SERP Monitoring Scan
+        run: |
+          echo "🔎 Avvio SERP monitoring..."
+          RESPONSE=$(curl ${{ env.CURL_OPTS }} \
+            -H "${{ env.AUTH_HEADER }}" \
+            "${{ env.APP_URL }}/api/cron/serp-monitoring")
+          echo "Response: $RESPONSE"
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # MONTHLY: Reset Monthly Counters (1° del mese, 00:30 UTC)
+  # Resetta responsesUsedThisMonth e riattiva bot PAUSED.
+  # Gira 30min dopo reset-credits per evitare conflitti DB.
+  # ═══════════════════════════════════════════════════════════════════════
+  reset-monthly-counters:
+    if: >-
+      github.event.schedule == '30 0 1 * *' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'reset-monthly-counters' || github.event.inputs.job == 'all'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Reset Monthly Counters
+        run: |
+          echo "🔄 Avvio reset contatori mensili..."
+          RESPONSE=$(curl ${{ env.CURL_OPTS }} \
+            -X POST \
+            -H "${{ env.AUTH_HEADER }}" \
+            -H "Content-Type: application/json" \
+            "${{ env.APP_URL }}/api/cron/reset-monthly-counters")
+          echo "Response: $RESPONSE"
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # MONTHLY: Partner Fees (1° del mese, 01:00 UTC)
+  # Calcola fee partner, gestisce trial expiry e grace period.
+  # Gira dopo reset-monthly-counters per avere contatori freschi.
+  # ═══════════════════════════════════════════════════════════════════════
+  partner-fees:
+    if: >-
+      github.event.schedule == '0 1 1 * *' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'partner-fees' || github.event.inputs.job == 'all'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Calculate Partner Fees
+        run: |
+          echo "💰 Avvio calcolo fee partner..."
+          RESPONSE=$(curl ${{ env.CURL_OPTS }} \
+            -X POST \
+            -H "${{ env.AUTH_HEADER }}" \
+            -H "Content-Type: application/json" \
+            "${{ env.APP_URL }}/api/cron/partner-fees")
+          echo "Response: $RESPONSE"
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # EVERY 10 MIN: Signal Classification Retry
+  # Riprova la classificazione per signal rimasti in stato 'pending_classify'.
+  # Riduce la latenza di classificazione usando il retry handler.
+  # ═══════════════════════════════════════════════════════════════════════
+  signal-classify-retry:
+    if: >-
+      github.event.schedule == '*/10 * * * *' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'signal-classify-retry' || github.event.inputs.job == 'all'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Signal Classification Retry
+        run: |
+          echo "🔄 Avvio signal classification retry..."
+          RESPONSE=$(curl ${{ env.CURL_OPTS }} \
+            -H "${{ env.AUTH_HEADER }}" \
+            "${{ env.APP_URL }}/api/cron/signal-classify-retry")
+          echo "Response: $RESPONSE"
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # EVERY 15 MIN: Signal Ingestion Fast
+  # Raccoglie commenti e menzioni da Meta e LinkedIn per i progetti attivi.
+  # Modalità fast: solo commenti (MetaComment + LinkedInComment adapters).
+  # ═══════════════════════════════════════════════════════════════════════
+  signal-ingestion-fast:
+    if: >-
+      github.event.schedule == '*/15 * * * *' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'signal-ingestion-fast' || github.event.inputs.job == 'all'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Signal Ingestion Fast
+        run: |
+          echo "Avvio signal ingestion (fast)..."
+          RESPONSE=$(curl ${{ env.CURL_OPTS }} \
+            -H "${{ env.AUTH_HEADER }}" \
+            "${{ env.APP_URL }}/api/cron/signal-ingestion?mode=fast")
+          echo "Response: $RESPONSE"
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # DAILY: Signal Ingestion Trends (05:00 UTC)
+  # Raccoglie segnali trend da SERP per i progetti attivi.
+  # Modalità trends: solo SerpBridgeAdapter (+ TrendDetectorAdapter in Sprint 5).
+  # ═══════════════════════════════════════════════════════════════════════
+  signal-ingestion-trends:
+    if: >-
+      github.event.schedule == '0 5 * * *' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'signal-ingestion-trends' || github.event.inputs.job == 'all'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Signal Ingestion Trends
+        run: |
+          echo "Avvio signal ingestion (trends)..."
+          RESPONSE=$(curl ${{ env.CURL_OPTS }} \
+            -H "${{ env.AUTH_HEADER }}" \
+            "${{ env.APP_URL }}/api/cron/signal-ingestion?mode=trends")
+          echo "Response: $RESPONSE"
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # EVERY 6 HOURS: Signal Ingestion Full
+  # Raccoglie commenti + insights da Meta e LinkedIn per i progetti attivi.
+  # Modalità full: commenti + MetaInsights adapter (reach, engagement, ecc).
+  # ═══════════════════════════════════════════════════════════════════════
+  signal-ingestion-full:
+    if: >-
+      github.event.schedule == '0 */6 * * *' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'signal-ingestion-full' || github.event.inputs.job == 'all'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Signal Ingestion Full
+        run: |
+          echo "Avvio signal ingestion (full)..."
+          RESPONSE=$(curl ${{ env.CURL_OPTS }} \
+            -H "${{ env.AUTH_HEADER }}" \
+            "${{ env.APP_URL }}/api/cron/signal-ingestion?mode=full")
+          echo "Response: $RESPONSE"
+
+  # ═══════════════════════════════════════════════════════════════════════
+  # EVERY 2 HOURS: Signal Ingestion Proactive Auto-Publish
+  # Per i progetti con proactiveAutoPublish=true e condizione di unlock
+  # soddisfatta (>=20 approvazioni manuali, edit ratio <30%), pubblica
+  # automaticamente i commenti proattivi con score > proactiveOpportunityMin.
+  # ═══════════════════════════════════════════════════════════════════════
+  signal-ingestion-proactive:
+    if: >-
+      github.event.schedule == '0 */2 * * *' ||
+      (github.event_name == 'workflow_dispatch' && (github.event.inputs.job == 'signal-ingestion-proactive' || github.event.inputs.job == 'all'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Signal Ingestion Proactive Auto-Publish
+        run: |
+          echo "Avvio signal ingestion (proactive)..."
+          RESPONSE=$(curl ${{ env.CURL_OPTS }} \
+            -H "${{ env.AUTH_HEADER }}" \
+            "${{ env.APP_URL }}/api/cron/signal-ingestion?mode=proactive")
+          echo "Response: $RESPONSE"
